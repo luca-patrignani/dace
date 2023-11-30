@@ -81,8 +81,7 @@ class AugAssignToWCR(transformation.SingleStateTransformation):
 
             # If in map, only match if the subset is independent of any
             # map indices (otherwise no conflict)
-            if not permissive and len(outedge.data.subset.free_symbols & set(me.map.params)) == len(
-                    me.map.params):
+            if not permissive and len(outedge.data.subset.free_symbols & set(me.map.params)) == len(me.map.params):
                 return False
 
         # Get relevant output connector
