@@ -1295,6 +1295,10 @@ def inline_sdfgs(sdfg: SDFG, permissive: bool = False, progress: bool = None, mu
     from dace.transformation.interstate import InlineSDFG, InlineMultistateSDFG
 
     counter = 0
+
+    if multistate:
+        counter += sdfg.apply_transformations_repeated(InlineMultistateSDFG, permissive=permissive, validate=False)
+
     nsdfgs = [(n, p) for n, p in sdfg.all_nodes_recursive() if isinstance(n, NestedSDFG)]
 
     for node, state in optional_progressbar(reversed(nsdfgs), title='Inlining SDFGs', n=len(nsdfgs), progress=progress):
@@ -1303,17 +1307,6 @@ def inline_sdfgs(sdfg: SDFG, permissive: bool = False, progress: bool = None, mu
 
         # We have to reevaluate every time due to changing IDs
         state_id = sd.node_id(state)
-        if multistate:
-            candidate = {
-                InlineMultistateSDFG.nested_sdfg: node,
-            }
-            inliner = InlineMultistateSDFG()
-            inliner.setup_match(sd, id, state_id, candidate, 0, override=True)
-            if inliner.can_be_applied(state, 0, sd, permissive=permissive):
-                inliner.apply(state, sd)
-                counter += 1
-                continue
-
         candidate = {
             InlineSDFG.nested_sdfg: node,
         }
