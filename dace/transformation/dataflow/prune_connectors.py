@@ -44,11 +44,6 @@ class PruneConnectors(pm.SingleStateTransformation):
             if conn in syms or conn in symnames or conn in nsdfg.sdfg.symbols:
                 prune_in.remove(conn)
 
-        # Add WCR outputs to "do not prune" input list
-        for e in graph.out_edges(nsdfg):
-            if e.data.wcr is not None and e.src_conn in prune_in:
-                prune_in.remove(e.src_conn)
-
         if not prune_in and not prune_out:
             return False
 
@@ -58,37 +53,63 @@ class PruneConnectors(pm.SingleStateTransformation):
         nsdfg = self.nsdfg
 
         # Fission subgraph around nsdfg into its own state to avoid data races
-        all_nodes = None
+        all_nodes = set()
         for cc in nx.weakly_connected_components(state._nx):
             if nsdfg in cc:
                 all_nodes = set(cc)
 
-        input_nodes = set()
-        nsdfg_nodes = set()
-        nsdfg_nodes.add(nsdfg)
+        inputs = set()
+        for inedge in state.in_edges(nsdfg):
+            if inedge.data is None:
+                continue
+
+            pred = state.memlet_path(inedge)[0].src
+            inputs.add(pred)
+
+        successors = set()
+        for access_node in inputs:
+            for edge in state.bfs_edges(access_node):
+                successors.add(edge.dst)
+                for iedge in state.in_edges(edge.dst):
+                    if iedge == edge:
+                        continue
+
+                    in_path = state.memlet_path(iedge)
+                    source = in_path.pop(0).src
+                    if state.in_degree(source) == 0:
+                        successors.add(source)
+
+                    for e in in_path:
+                        successors.add(e.src)
+
+            for node in list(successors):
+                if isinstance(node, nodes.AccessNode):
+                    for oedge in state.out_edges(node):
+                        if oedge.dst not in successors:
+                            successors.remove(node)
+                            break
+
+        predecessors = all_nodes - successors
+        subgraph = StateSubgraphView(state, predecessors)
+        pred_state = helpers.state_fission(sdfg, subgraph)
+
+        subgraph_nodes = set()
+        subgraph_nodes.add(nsdfg)
         for inedge in state.in_edges(nsdfg):
             if inedge.data is None:
                 continue
             path = state.memlet_path(inedge)
             for edge in path:
-                nsdfg_nodes.add(edge.src)
-
-            if state.in_degree(path[0].src) > 0:
-                input_nodes.add(path[0].src)
+                subgraph_nodes.add(edge.src)
 
         for oedge in state.out_edges(nsdfg):
             if oedge.data is None:
                 continue
             path = state.memlet_path(oedge)
             for edge in path:
-                nsdfg_nodes.add(edge.dst)
+                subgraph_nodes.add(edge.dst)
 
-        successors = set([edge.dst for edge in state.bfs_edges(nsdfg)])
-        predecessors = (all_nodes - successors - nsdfg_nodes) | input_nodes
-        subgraph = StateSubgraphView(state, predecessors)
-        _ = helpers.state_fission(sdfg, subgraph)
-
-        subgraph = StateSubgraphView(state, nsdfg_nodes)
+        subgraph = StateSubgraphView(state, subgraph_nodes)
         nsdfg_state = helpers.state_fission(sdfg, subgraph)
 
         read_set, write_set = nsdfg.sdfg.read_and_write_sets()
@@ -98,11 +119,6 @@ class PruneConnectors(pm.SingleStateTransformation):
         # Detect which nodes are used, so we can delete unused nodes after the
         # connectors have been pruned
         all_data_used = read_set | write_set
-
-        # Add WCR outputs to "do not prune" input list
-        for e in nsdfg_state.out_edges(nsdfg):
-            if e.data.wcr is not None and e.src_conn in prune_in:
-                prune_in.remove(e.src_conn)
 
         for conn in prune_in:
             for e in nsdfg_state.in_edges_by_connector(nsdfg, conn):
