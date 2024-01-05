@@ -157,7 +157,7 @@ class AugAssignToWCR(transformation.SingleStateTransformation):
             new_state = helpers.state_fission_after(sdfg, state, tasklet)
         else:
             new_state = state
-        
+
         if self.expr_index == 0:
             inedges = new_state.edges_between(input, tasklet)
             outedge = new_state.edges_between(tasklet, output)[0]

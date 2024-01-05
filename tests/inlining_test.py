@@ -1,6 +1,7 @@
 # Copyright 2019-2021 ETH Zurich and the DaCe authors. All rights reserved.
 import dace
 from dace.transformation.interstate import InlineSDFG, StateFusion
+from dace.transformation.dataflow import MergeSourceSinkArrays
 from dace.libraries import blas
 from dace.library import change_default
 import numpy as np
@@ -127,15 +128,16 @@ def test_multistate_inline():
         nested(A)
 
     sdfg = outerprog.to_sdfg(simplify=True)
+
+    A = np.random.rand(20)
+    expected = np.copy(A)
+    sdfg(expected)
+
     from dace.transformation.interstate import InlineMultistateSDFG
     sdfg.apply_transformations(InlineMultistateSDFG)
     assert sdfg.number_of_nodes() in (4, 5)
 
-    A = np.random.rand(20)
-    expected = np.copy(A)
-    outerprog.f(expected)
-
-    outerprog(A)
+    sdfg(A)
     assert np.allclose(A, expected)
 
 
@@ -152,15 +154,16 @@ def test_multistate_inline_samename():
             nested(A)
 
     sdfg = outerprog.to_sdfg(simplify=True)
+
+    A = np.random.rand(20)
+    expected = np.copy(A)
+    sdfg(expected)
+
     from dace.transformation.interstate import InlineMultistateSDFG
     sdfg.apply_transformations(InlineMultistateSDFG)
     assert sdfg.number_of_nodes() in (7, 8)
 
-    A = np.random.rand(20)
-    expected = np.copy(A)
-    outerprog.f(expected)
-
-    outerprog(A)
+    sdfg(A)
     assert np.allclose(A, expected)
 
 def test_multistate_inline_outer_dependencies():
@@ -206,6 +209,142 @@ def test_multistate_inline_outer_dependencies():
     outerprog(A, B)
     assert np.allclose(A, expected_a)
     assert np.allclose(B, expected_b)
+
+def test_multistate_inline_outer_dependencies():
+
+    @dace.program
+    def nested(A: dace.float64[20]):
+        for i in range(1, 20):
+            A[i] += A[i - 1]
+
+    @dace.program
+    def outerprog(A: dace.float64[20], B: dace.float64[20]):
+        for i in dace.map[0:20]:
+            with dace.tasklet:
+                a >> A[i]
+                b >> B[i]
+
+                a = 0
+                b = 1
+
+        nested(A)
+
+        for i in dace.map[0:20]:
+            with dace.tasklet:
+                a << A[i]
+                b >> A[i]
+
+                b = 2 * a
+
+    sdfg = outerprog.to_sdfg(simplify=False)
+    sdfg.apply_transformations_repeated((StateFusion, InlineSDFG))
+    assert len(sdfg.states()) == 1
+
+    A = np.random.rand(20)
+    B = np.random.rand(20)
+    expected_a = np.copy(A)
+    expected_b = np.copy(B)
+    sdfg(expected_a, expected_b)
+
+    from dace.transformation.interstate import InlineMultistateSDFG
+    sdfg.apply_transformations(InlineMultistateSDFG)
+
+    sdfg(A, B)
+    assert np.allclose(A, expected_a)
+    assert np.allclose(B, expected_b)
+
+
+def test_multistate_inline_concurrent_subgraphs():
+
+    @dace.program
+    def nested(A: dace.float64[10], B: dace.float64[10]):
+        for i in range(1, 10):
+            B[i] = A[i]
+
+    @dace.program
+    def outerprog(A: dace.float64[10], B: dace.float64[10], C: dace.float64[10]):
+        nested(A, B)
+
+        for i in dace.map[0:10]:
+            with dace.tasklet:
+                a << A[i]
+                c >> C[i]
+
+                c = 2 * a
+
+    sdfg = outerprog.to_sdfg(simplify=False)
+    dace.propagate_memlets_sdfg(sdfg)
+    sdfg.apply_transformations_repeated((StateFusion, InlineSDFG))
+    assert len(sdfg.states()) == 1
+    assert len([node for node in sdfg.start_state.data_nodes()]) == 3
+
+    A = np.random.rand(10)
+    B = np.random.rand(10)
+    C = np.random.rand(10)
+    expected_a = np.copy(A)
+    expected_b = np.copy(B)
+    expected_c = np.copy(C)
+    sdfg(expected_a, expected_b, expected_c)
+
+    from dace.transformation.interstate import InlineMultistateSDFG
+    applied = sdfg.apply_transformations(InlineMultistateSDFG)
+    assert applied == 1
+
+    sdfg(A, B, C)
+    assert np.allclose(A, expected_a)
+    assert np.allclose(B, expected_b)
+    assert np.allclose(C, expected_c)
+
+def test_multistate_inline_subsets():
+
+    @dace.program
+    def nested(A: dace.float64[2, 10], B: dace.float64[2, 10], C: dace.float64[2, 10]):
+        for i in range(1, 10):
+            if C[0, i] == 0:
+                B[0, i] = A[0, i] + C[0, i] + C[1, i]
+                B[0, i-1] = B[0, i]
+            else:
+                B[0, i-1] = C[0, i]
+
+        for i in dace.map[0:10]:
+            with dace.tasklet:
+                a << B[0, i]
+                b >> B[0, i]
+                b = a + 1
+
+    @dace.program
+    def outerprog(A: dace.float64[2, 10], B: dace.float64[2, 10], C: dace.float64[2, 10]):
+        nested(A, B, C)
+
+        for i in dace.map[0:10]:
+            with dace.tasklet:
+                a << A[1, i]
+                b >> B[1, i]
+
+                b = 2 * a
+
+    sdfg = outerprog.to_sdfg(simplify=False)
+    dace.propagate_memlets_sdfg(sdfg)
+    sdfg.apply_transformations_repeated((StateFusion, MergeSourceSinkArrays, InlineSDFG))
+    assert len(sdfg.states()) == 1
+    assert len([node for node in sdfg.start_state.data_nodes()]) == 3
+
+    A = np.random.rand(2, 10)
+    B = np.random.rand(2, 10)
+    C = np.random.rand(2, 10)
+    expected_a = np.copy(A)
+    expected_b = np.copy(B)
+    expected_c = np.copy(C)
+    sdfg(expected_a, expected_b, expected_c)
+
+    from dace.transformation.interstate import InlineMultistateSDFG
+    applied = sdfg.apply_transformations(InlineMultistateSDFG)
+    assert applied == 1
+
+    sdfg(A, B, C)
+    assert np.allclose(A, expected_a)
+    assert np.allclose(B, expected_b)
+    assert np.allclose(C, expected_c)
 
 def test_inline_symexpr():
     nsdfg = dace.SDFG('inner')
@@ -416,7 +555,9 @@ if __name__ == "__main__":
     test_empty_memlets()
     test_multistate_inline()
     test_multistate_inline_outer_dependencies()
+    test_multistate_inline_concurrent_subgraphs()
     test_multistate_inline_samename()
+    test_multistate_inline_subsets()
     test_inline_symexpr()
     test_inline_unsqueeze()
     test_inline_unsqueeze2()
